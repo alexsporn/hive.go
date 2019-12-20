@@ -22,12 +22,12 @@ var running int32 = 0
 
 var batchQueue = make(chan *CachedObject, BATCH_WRITER_QUEUE_SIZE)
 
-func StartBatchWriter() {
+func StartBatchWriter(badgerInstance *badger.DB) {
 	startStopMutex.Lock()
 	if atomic.LoadInt32(&running) == 0 {
 		atomic.StoreInt32(&running, 1)
 
-		go runBatchWriter()
+		go runBatchWriter(badgerInstance)
 	}
 	startStopMutex.Unlock()
 }
@@ -48,7 +48,7 @@ func WaitForWritesToFlush() {
 
 func batchWrite(object *CachedObject) {
 	if atomic.LoadInt32(&running) == 0 {
-		StartBatchWriter()
+		StartBatchWriter(object.objectStorage.badgerInstance)
 	}
 
 	batchQueue <- object
@@ -88,8 +88,7 @@ func releaseObject(cachedObject *CachedObject) {
 	objectStorage.cacheMutex.Unlock()
 }
 
-func runBatchWriter() {
-	badgerInstance := GetBadgerInstance()
+func runBatchWriter(badgerInstance *badger.DB) {
 
 	for atomic.LoadInt32(&running) == 1 {
 		writeWg.Add(1)
