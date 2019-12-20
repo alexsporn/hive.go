@@ -16,10 +16,10 @@ type ObjectStorage struct {
 	options        *ObjectStorageOptions
 }
 
-func New(storageId string, objectFactory StorableObjectFactory, optionalOptions ...ObjectStorageOption) *ObjectStorage {
+func New(badgerInstance *badger.DB, storageId []byte, objectFactory StorableObjectFactory, optionalOptions ...ObjectStorageOption) *ObjectStorage {
 	return &ObjectStorage{
-		badgerInstance: GetBadgerInstance(),
-		storageId:      []byte(storageId),
+		badgerInstance: badgerInstance,
+		storageId:      storageId,
 		objectFactory:  objectFactory,
 		cachedObjects:  map[string]*CachedObject{},
 		options:        newTransportOutputStorageFilters(optionalOptions),
