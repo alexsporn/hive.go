@@ -9,6 +9,7 @@ import (
 
 type ObjectStorage struct {
 	badgerInstance *badger.DB
+	batchedWriter  *BatchedWriter
 	storageId      []byte
 	objectFactory  StorableObjectFactory
 	cachedObjects  map[string]*CachedObject
@@ -19,6 +20,18 @@ type ObjectStorage struct {
 func New(badgerInstance *badger.DB, storageId []byte, objectFactory StorableObjectFactory, optionalOptions ...ObjectStorageOption) *ObjectStorage {
 	return &ObjectStorage{
 		badgerInstance: badgerInstance,
+		batchedWriter:  NewBatchedWriter(badgerInstance),
+		storageId:      storageId,
+		objectFactory:  objectFactory,
+		cachedObjects:  map[string]*CachedObject{},
+		options:        newTransportOutputStorageFilters(optionalOptions),
+	}
+}
+
+func NewWithBatchWriter(badgerInstance *badger.DB, batchedWriter *BatchedWriter, storageId []byte, objectFactory StorableObjectFactory, optionalOptions ...ObjectStorageOption) *ObjectStorage {
+	return &ObjectStorage{
+		badgerInstance: badgerInstance,
+		batchedWriter:  batchedWriter,
 		storageId:      storageId,
 		objectFactory:  objectFactory,
 		cachedObjects:  map[string]*CachedObject{},
@@ -137,6 +150,10 @@ func (objectStorage *ObjectStorage) Prune() error {
 	objectStorage.cacheMutex.Unlock()
 
 	return nil
+}
+
+func (objectStorage *ObjectStorage) StopBatchWriter() {
+	objectStorage.batchedWriter.StopBatchWriter()
 }
 
 func (objectStorage *ObjectStorage) accessCache(key []byte, onCacheHit func(*CachedObject), onCacheMiss func(*CachedObject)) *CachedObject {
