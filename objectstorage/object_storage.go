@@ -37,6 +37,13 @@ func (objectStorage *ObjectStorage) Store(object StorableObject) *CachedObject {
 	return objectStorage.storeObjectInCache(object, true)
 }
 
+func (objectStorage *ObjectStorage) GetSize() int {
+	objectStorage.cacheMutex.RLock()
+	size := len(objectStorage.cachedObjects)
+	objectStorage.cacheMutex.RUnlock()
+	return size
+}
+
 func (objectStorage *ObjectStorage) Load(key []byte) (*CachedObject, error) {
 	return objectStorage.accessCache(key, nil, func(cachedObject *CachedObject) {
 		loadedObject, err := objectStorage.loadObjectFromBadger(key)
@@ -195,7 +202,7 @@ func (objectStorage *ObjectStorage) storeObjectInCache(object StorableObject, pe
 func (objectStorage *ObjectStorage) loadObjectFromBadger(key []byte) (StorableObject, error) {
 	var marshaledData []byte
 	if err := objectStorage.badgerInstance.View(func(txn *badger.Txn) error {
-		if item, err := txn.Get(append(objectStorage.storageId, key...)); err != nil {
+		if item, err := txn.Get(objectStorage.generatePrefix([][]byte{key})); err != nil {
 			return err
 		} else {
 			return item.Value(func(val []byte) error {
