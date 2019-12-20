@@ -100,16 +100,18 @@ func runBatchWriter(badgerInstance *badger.DB) {
 
 		wb := badgerInstance.NewWriteBatch()
 
-		writtenValues := make([]*CachedObject, BATCH_WRITER_BATCH_SIZE)
+		writtenValues := make(map[string]*CachedObject)
 		writtenValuesCounter := 0
 	COLLECT_VALUES:
 		for writtenValuesCounter < BATCH_WRITER_BATCH_SIZE {
 			select {
 			case objectToPersist := <-batchQueue:
-				writeObject(wb, objectToPersist)
-
-				writtenValues[writtenValuesCounter] = objectToPersist
-				writtenValuesCounter++
+				_, contains := writtenValues[typeutils.BytesToString(objectToPersist.key)]
+				if !contains {
+					writeObject(wb, objectToPersist)
+					writtenValues[typeutils.BytesToString(objectToPersist.key)] = objectToPersist
+					writtenValuesCounter++
+				}
 			case <-time.After(BATCH_WRITER_BATCH_TIMEOUT):
 				waitingForTimeout = false
 				timeoutWg.Done()
