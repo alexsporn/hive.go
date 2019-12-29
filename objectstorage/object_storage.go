@@ -58,18 +58,18 @@ func (objectStorage *ObjectStorage) GetSize() int {
 }
 
 func (objectStorage *ObjectStorage) Load(key []byte) (*CachedObject, error) {
-	return objectStorage.accessCache(key, nil, func(cachedObject *CachedObject) {
+	return objectStorage.accessCacheWithCallbacks(key, nil, func(cachedObject *CachedObject) {
 		loadedObject, err := objectStorage.loadObjectFromBadger(key)
 		if loadedObject != nil {
 			loadedObject.Persist()
 		}
 
 		cachedObject.publishResult(loadedObject, err)
-	}).waitForResult()
+	}, true).waitForResult()
 }
 
 func (objectStorage *ObjectStorage) ComputeIfAbsent(key []byte, remappingFunction func(key []byte) (StorableObject, error)) (*CachedObject, error) {
-	return objectStorage.accessCache(key, func(cachedObject *CachedObject) {
+	return objectStorage.accessCacheWithCallbacks(key, func(cachedObject *CachedObject) {
 		// wait for it to be published
 		cachedObject.wg.Wait()
 
@@ -100,58 +100,49 @@ func (objectStorage *ObjectStorage) ComputeIfAbsent(key []byte, remappingFunctio
 		} else {
 			cachedObject.publishResult(remappingFunction(key))
 		}
-	}).waitForResult()
+	}, true).waitForResult()
 }
 
-// Stores an object only if it was not stored before. In contrast to "ComputeIfAbsent", this method does not access the value log
+// Stores an object only if it was not stored before. In contrast to "ComputeIfAbsent", this method does not access the
+// value log. If the object was not stored, then the returned CachedObject is nil and does not need to be Released.
 func (objectStorage *ObjectStorage) StoreIfAbsent(key []byte, object StorableObject) (stored bool, cachedObject *CachedObject, err error) {
-	cachedObject, err = objectStorage.accessCache(key, func(cachedObject *CachedObject) {
-		// if we have a cache hit => wait till the previous result was published
-		cachedObject.wg.Wait()
+	objectStorage.accessCacheWithCallbacks(key, func(existingCachedObject *CachedObject) {
+		existingCachedObject.wg.Wait()
 
-		// if currentValue is still nil => update result and mark as stored
-		cachedObject.valueMutex.RLock()
-		if cachedObject.value == nil {
-			cachedObject.valueMutex.RUnlock()
-
-			cachedObject.valueMutex.Lock()
-			if cachedObject.value == nil {
-				object.Persist()
-				object.SetModified()
-
-				cachedObject.value = object
-				cachedObject.errMutex.Lock()
-				cachedObject.err = nil
-				cachedObject.errMutex.Unlock()
-
-				stored = true
-			}
-			cachedObject.valueMutex.Unlock()
-		} else {
-			cachedObject.valueMutex.RUnlock()
+		if stored = existingCachedObject.updateEmptyResult(object, nil); stored {
+			cachedObject = existingCachedObject
 		}
-	}, func(cachedObject *CachedObject) {
+	}, func(*CachedObject) {
 		if objectExists, err := objectStorage.objectExistsInBadger(key); err != nil {
-			cachedObject.publishResult(nil, err)
+			panic(err)
 		} else {
 			if !objectExists {
-				object.Persist()
-				object.SetModified()
+				if newCachedObject, cacheHit := objectStorage.accessCache(key, true); cacheHit {
+					newCachedObject.wg.Wait()
 
-				stored = true
+					if stored = newCachedObject.updateEmptyResult(object, nil); stored {
+						cachedObject = newCachedObject
+					}
+				} else {
+					object.Persist()
+					object.SetModified()
 
-				cachedObject.publishResult(object, nil)
-			} else {
-				cachedObject.Release()
+					newCachedObject.publishResult(object, nil)
+
+					stored = true
+					cachedObject = newCachedObject
+				}
 			}
 		}
-	}).waitForResult()
+	}, false)
+
+	_, err = cachedObject.waitForResult()
 
 	return
 }
 
 func (objectStorage *ObjectStorage) Delete(key []byte) {
-	objectStorage.accessCache(key, func(cachedObject *CachedObject) {
+	objectStorage.accessCacheWithCallbacks(key, func(cachedObject *CachedObject) {
 		if storableObject := cachedObject.Get(); storableObject != nil {
 			storableObject.Persist()
 			storableObject.Delete()
@@ -165,7 +156,7 @@ func (objectStorage *ObjectStorage) Delete(key []byte) {
 
 		cachedObject.publishResult(nil, nil)
 		cachedObject.Release()
-	})
+	}, true)
 }
 
 // Foreach can only iterate over persisted entries, so there might be a slight delay before you can find previously
@@ -180,7 +171,7 @@ func (objectStorage *ObjectStorage) ForEach(consumer func(key []byte, cachedObje
 			item := it.Item()
 			key := item.Key()[len(objectStorage.storageId):]
 
-			if cachedObject, err := objectStorage.accessCache(key, nil, func(cachedObject *CachedObject) {
+			if cachedObject, err := objectStorage.accessCacheWithCallbacks(key, nil, func(cachedObject *CachedObject) {
 				_ = item.Value(func(val []byte) error {
 					marshaledData := make([]byte, len(val))
 					copy(marshaledData, val)
@@ -194,7 +185,7 @@ func (objectStorage *ObjectStorage) ForEach(consumer func(key []byte, cachedObje
 
 					return nil
 				})
-			}).waitForResult(); err != nil {
+			}, true).waitForResult(); err != nil {
 				it.Close()
 
 				return err
@@ -225,50 +216,61 @@ func (objectStorage *ObjectStorage) StopBatchWriter() {
 	objectStorage.batchedWriter.StopBatchWriter()
 }
 
-func (objectStorage *ObjectStorage) accessCache(key []byte, onCacheHit func(*CachedObject), onCacheMiss func(*CachedObject)) *CachedObject {
-	copiedKey := make([]byte, len(key))
-	copy(copiedKey, key)
-	stringKey := typeutils.BytesToString(copiedKey)
-
-	objectStorage.cacheMutex.RLock()
-	cachedObject, cachedObjectExists := objectStorage.cachedObjects[stringKey]
-	if cachedObjectExists {
-		cachedObject.RegisterConsumer()
-
-		objectStorage.cacheMutex.RUnlock()
-
+func (objectStorage *ObjectStorage) accessCacheWithCallbacks(key []byte, onCacheHit func(*CachedObject), onCacheMiss func(*CachedObject), createMissingCachedObject bool) *CachedObject {
+	cachedObject, cacheHit := objectStorage.accessCache(key, createMissingCachedObject)
+	if cacheHit {
 		if onCacheHit != nil {
 			onCacheHit(cachedObject)
 		}
 	} else {
-		objectStorage.cacheMutex.RUnlock()
-		objectStorage.cacheMutex.Lock()
-		if cachedObject, cachedObjectExists = objectStorage.cachedObjects[stringKey]; cachedObjectExists {
-			cachedObject.RegisterConsumer()
-
-			objectStorage.cacheMutex.Unlock()
-
-			if onCacheHit != nil {
-				onCacheHit(cachedObject)
-			}
-		} else {
-			cachedObject = newCachedObject(objectStorage, copiedKey)
-			cachedObject.RegisterConsumer()
-
-			objectStorage.cachedObjects[stringKey] = cachedObject
-			objectStorage.cacheMutex.Unlock()
-
-			if onCacheMiss != nil {
-				onCacheMiss(cachedObject)
-			}
+		if onCacheMiss != nil {
+			onCacheMiss(cachedObject)
 		}
 	}
 
 	return cachedObject
 }
 
+func (objectStorage *ObjectStorage) accessCache(key []byte, createMissingCachedObject bool) (cachedObject *CachedObject, cacheHit bool) {
+	copiedKey := make([]byte, len(key))
+	copy(copiedKey, key)
+	stringKey := typeutils.BytesToString(copiedKey)
+
+	objectStorage.cacheMutex.RLock()
+	alreadyCachedObject, cachedObjectExists := objectStorage.cachedObjects[stringKey]
+	if cachedObjectExists {
+		alreadyCachedObject.RegisterConsumer()
+
+		objectStorage.cacheMutex.RUnlock()
+
+		cacheHit = true
+	} else {
+		objectStorage.cacheMutex.RUnlock()
+		objectStorage.cacheMutex.Lock()
+		if alreadyCachedObject, cachedObjectExists = objectStorage.cachedObjects[stringKey]; cachedObjectExists {
+			alreadyCachedObject.RegisterConsumer()
+
+			objectStorage.cacheMutex.Unlock()
+
+			cacheHit = true
+		} else {
+			if createMissingCachedObject {
+				alreadyCachedObject = newCachedObject(objectStorage, copiedKey)
+				alreadyCachedObject.RegisterConsumer()
+
+				objectStorage.cachedObjects[stringKey] = alreadyCachedObject
+			}
+			objectStorage.cacheMutex.Unlock()
+		}
+	}
+
+	cachedObject = alreadyCachedObject
+
+	return
+}
+
 func (objectStorage *ObjectStorage) storeObjectInCache(object StorableObject, persist bool) *CachedObject {
-	return objectStorage.accessCache(object.GetStorageKey(), func(cachedObject *CachedObject) {
+	return objectStorage.accessCacheWithCallbacks(object.GetStorageKey(), func(cachedObject *CachedObject) {
 		if !cachedObject.publishResult(object, nil) {
 			if currentValue := cachedObject.Get(); currentValue != nil {
 				currentValue.Update(object)
@@ -282,7 +284,7 @@ func (objectStorage *ObjectStorage) storeObjectInCache(object StorableObject, pe
 		}
 
 		cachedObject.publishResult(object, nil)
-	})
+	}, true)
 }
 
 func (objectStorage *ObjectStorage) loadObjectFromBadger(key []byte) (StorableObject, error) {
