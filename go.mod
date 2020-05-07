@@ -1,9 +1,9 @@
 module github.com/iotaledger/hive.go
 
-go 1.13
+go 1.14
 
 require (
-	github.com/dgraph-io/badger/v2 v2.0.1
+	github.com/dgraph-io/badger v1.6.1
 	github.com/golang/protobuf v1.3.1
 	github.com/gorilla/websocket v1.4.0
 	github.com/iotaledger/iota.go v1.0.0-beta.9

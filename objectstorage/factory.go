@@ -1,7 +1,7 @@
 package objectstorage
 
 import (
-	"github.com/dgraph-io/badger/v2"
+	"github.com/dgraph-io/badger"
 )
 
 // Factory is a utility that offers an api for a more compact creation of multiple ObjectStorage instances from within

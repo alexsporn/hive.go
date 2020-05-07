@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/dgraph-io/badger/v2"
-	"github.com/dgraph-io/badger/v2/pb"
+	"github.com/dgraph-io/badger"
+	"github.com/dgraph-io/badger/pb"
 
 	"github.com/iotaledger/hive.go/syncutils"
 )
